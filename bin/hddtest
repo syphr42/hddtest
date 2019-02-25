@@ -1,0 +1,56 @@
+#!/bin/bash
+
+usage() {
+    echo "$(basename "${0}") <device>"
+    exit 1
+}
+
+if [ "$#" -ne 1 ]; then
+    echo 'error: missing drive name'
+    usage
+fi
+
+echo "!!! WARNING !!!"
+echo "This test will DESTROY ANY DATA present on the drive."
+echo "Selected drive: ${DRIVE}"
+echo ""
+read -rp "Type the device again to confirm: " CONFIRM
+
+if [ "${CONFIRM}" != "${DEVICE}" ]; then
+    echo "error: confirmation mismatch"
+    exit 1
+fi
+
+DEVICE=${1}
+DEVICE_NAME=${DEVICE#/dev}
+LOG=./hddtest-${DEVICE_NAME//\//-}.log
+
+LOGICAL_BLOCK_SIZE=$(< /sys/class/block/"${DEVICE_NAME}"/queue/logical_block_size)
+PHYSICAL_BLOCK_SIZE=$(< /sys/class/block/"${DEVICE_NAME}"/queue/physical_block_size)
+LOGICAL_SECTOR_COUNT=$(< /sys/class/block/"${DEVICE_NAME}"/size)
+PHYSICAL_SECTOR_COUNT=$((LOGICAL_SECTOR_COUNT * LOGICAL_BLOCK_SIZE / PHYSICAL_BLOCK_SIZE))
+
+echo "Starting tests. See '${LOG}' for results."
+echo ""
+
+set -xe
+
+# Print initial SMART info
+smartctl --all "${DEVICE}" | tee "${LOG}"
+
+# Run SMART tests
+smartctl --test=short --test=conveyance "${DEVICE}" | tee --append "${LOG}"
+smartctl --offllineauto=on --test=offline "${DEVICE}" | tee --append "${LOG}"
+smartctl --log=xselftest,selftest "${DEVICE}" | tee --append "${LOG}"
+
+# Overwrite the entire disk with zeroes and then print temperature log
+dd if=/dev/zero of="${DEVICE}" bs="${PHYSICAL_BLOCK_SIZE}" count="${PHYSICAL_SECTOR_COUNT}" seek=0 status=progress  | tee --append "${LOG}"
+smartctl --log=scttemp "${DEVICE}" | tee --append "${LOG}"
+
+# Print new SMART info and error log
+smartctl --all "${DEVICE}" | tee "${LOG}"
+smartctl --log=xerror,error "${DEVICE}" | tee --append "${LOG}"
+
+# Execute badblocks to write/read test the entire disk twice and print logs
+badblocks -wsv -b 65536 -p 2 "${DEVICE}" | tee --append "${LOG}"
+smartctl --log=xerror,error,devstat "${DEVICE}" | tee --append "${LOG}"
